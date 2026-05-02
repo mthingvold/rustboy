@@ -3,15 +3,15 @@ use sdl2::EventPump;
 use sdl2::keyboard::{Keycode, Scancode};
 
 // TODO - Configurable Keymap
-const  D_PAD_DOWN: Keycode = Keycode::S;
-const    D_PAD_UP: Keycode = Keycode::W;
-const  D_PAD_LEFT: Keycode = Keycode::A;
+const D_PAD_DOWN: Keycode = Keycode::S;
+const D_PAD_UP: Keycode = Keycode::W;
+const D_PAD_LEFT: Keycode = Keycode::A;
 const D_PAD_RIGHT: Keycode = Keycode::D;
 
-const  START: Keycode = Keycode::F;
+const START: Keycode = Keycode::F;
 const SELECT: Keycode = Keycode::G;
-const  BTN_B: Keycode = Keycode::J;
-const  BTN_A: Keycode = Keycode::I;
+const BTN_B: Keycode = Keycode::J;
+const BTN_A: Keycode = Keycode::I;
 
 
 pub struct Joypad {
@@ -63,37 +63,44 @@ impl Joypad {
         self.bit_5 = value & 0x20 != 0;
         self.bit_4 = value & 0x10 != 0;
     }
+    fn handle_key(&mut self, key: Keycode, pressed: bool) {
+        let _was_unpressed = |bit: bool| bit; // bit=true means "not pressed"
+
+        match key {
+            D_PAD_DOWN  => { if pressed && self.bit_3 && self.bit_4 { self.interrupt = true; } self.bit_3 = !pressed; }
+            START       => { if pressed && self.bit_3 && self.bit_5 { self.interrupt = true; } /* bit_3 shared */ }
+            D_PAD_UP    => { if pressed && self.bit_2 && self.bit_4 { self.interrupt = true; } self.bit_2 = !pressed; }
+            SELECT      => { if pressed && self.bit_2 && self.bit_5 { self.interrupt = true; } }
+            D_PAD_LEFT  => { if pressed && self.bit_1 && self.bit_4 { self.interrupt = true; } self.bit_1 = !pressed; }
+            BTN_B       => { if pressed && self.bit_1 && self.bit_5 { self.interrupt = true; } }
+            D_PAD_RIGHT => { if pressed && self.bit_0 && self.bit_4 { self.interrupt = true; } self.bit_0 = !pressed; }
+            BTN_A       => { if pressed && self.bit_0 && self.bit_5 { self.interrupt = true; } }
+            _ => {}
+        }
+    }
 }
 
 
+
+
 impl RunComponent for Joypad {
+
     fn run(&mut self, _cpu_clock_cycles: u64) {
-        for event in self.event_pump.poll_iter() {
+        let events: Vec<_> = self.event_pump.poll_iter().collect();
+        for event in events {
             match event {
                 sdl2::event::Event::Quit { .. } => std::process::exit(0),
-                sdl2::event::Event::KeyDown { keycode, keymod, .. } => {
-                    // println!("keycode: {:?}, keymod: {}", keycode, keymod.bits());
+
+                sdl2::event::Event::KeyDown { keycode: Some(key), .. } => {
+                    self.handle_key(key, true);
+                }
+                sdl2::event::Event::KeyUp { keycode: Some(key), .. } => {
+                    self.handle_key(key, false);
                 }
                 _ => {}
             }
         }
 
-        let keys: std::collections::HashSet<Keycode> = self.event_pump.keyboard_state().pressed_scancodes().filter_map(Keycode::from_scancode).collect();
-
-        let bit_3_pressed = keys.contains(&D_PAD_DOWN) && self.bit_4 || keys.contains(&START) && self.bit_5;
-        if self.bit_3 && bit_3_pressed { self.interrupt = true; }
-        self.bit_3 = !bit_3_pressed;
-
-        let bit_2_pressed = keys.contains(&D_PAD_UP) && self.bit_4 || keys.contains(&SELECT) && self.bit_5;
-        if self.bit_2 && bit_2_pressed { self.interrupt = true; }
-        self.bit_2 = !bit_2_pressed;
-
-        let bit_1_pressed = keys.contains(&D_PAD_LEFT) && self.bit_4 || keys.contains(&BTN_B) && self.bit_5;
-        if self.bit_1 && bit_1_pressed { self.interrupt = true; }
-        self.bit_1 = !bit_1_pressed;
-
-        let bit_0_pressed = keys.contains(&D_PAD_RIGHT) && self.bit_4 || keys.contains(&BTN_A) && self.bit_5;
-        if self.bit_0 && bit_0_pressed { self.interrupt = true; }
-        self.bit_0 = !bit_0_pressed;
     }
+
 }
