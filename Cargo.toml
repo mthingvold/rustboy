@@ -16,3 +16,11 @@ lto = true
 [dependencies]
 sdl2 = "0.34.5"
 nix = "0.9.0"
+
+[lib]
+name = "rustboy"
+path = "src/lib.rs"
+test = false
+
+[workspace]
+members = [".", "ui"]
