@@ -55,6 +55,7 @@ pub fn mooneye_all(dir: &str) {
 
         if path.is_file() && pathname.ends_with(".gb") {
 
+            unsafe {
             match fork() {
                 Ok(ForkResult::Parent { child, .. }) => {
                     let x = waitpid(child, None).unwrap();
@@ -74,6 +75,7 @@ pub fn mooneye_all(dir: &str) {
                 }
 
                 Err(_) => panic!("failed fork")
+            }
             }
         }
     }
