@@ -12,7 +12,6 @@ use oam::{OAMEntry, OAMFlags};
 use registers::lcdc::LCDC;
 use registers::lcds::LCDS;
 use sdl2::VideoSubsystem;
-use std::cmp::max;
 
 const V_RAM_SIZE: usize = 0x2000;
 const OAM_SIZE: usize = 0x0100;
@@ -31,6 +30,8 @@ const CYCLES_PER_LINE: u8 = 114;
 const V_BLANK_LINES: u8 = 10;
 
 const TOTAL_LINES: u8 = HEIGHT + V_BLANK_LINES;
+
+const VRAM_OFFSET: u16 = 0x8000;
 
 #[allow(dead_code)]
 pub struct PPU {
@@ -253,62 +254,6 @@ impl PPU {
         // 2.b - Background
         let background_pixels = self.background_pixels();
         self.display.draw(background_pixels);
-
-        // 2.c - Objects
-        // let object_pixels = self.object_pixels(visible);
-        // self.display.draw(object_pixels);
-
-        //        let mut dump = Vec::new();
-        //        let mut base = 0x8000;
-        //
-        //        for y in 0..18 {
-        //            for x in 0..20 {
-        //                let start = 0x8000 as u16 + (y * 16 * 18) + (x * 16);
-        //                let dx = (x * 8) as u32 as i32 - 8;
-        //                let dy = (y * 8) as u32 as i32 - 16;
-        //
-        //                for oy in 0..8 {
-        //                    //println!("{:#06X} {:#06X}", start + (oy * 2), start + (oy * 2) + 1);
-        //
-        //                    let txt1 = self.read(start + (oy * 2));
-        //                    let txt2 = self.read(start + (oy * 2) + 1);
-        //
-        //                    //println!("{:#010b} {:#010b}", txt1, txt2);
-        //
-        //                    for ox in 0..8 {
-        //                        let v0 = if (txt1 & (0x80 >> ox)) != 0 { 1 } else { 0 };
-        //                        let v1 = if (txt2 & (0x80 >> ox)) != 0 { 1 } else { 0 };
-        //
-        //                        let v = v0 << 1 | v1;
-        //
-        //                        if v == 0 {
-        //                            continue;
-        //                        }
-        //
-        //                        let color = match v {
-        //                            0b00 => Color::RGB(0, 0, 0),
-        //                            0b01 => Color::RGB(60, 60, 60),
-        //                            0b10 => Color::RGB(120, 120, 120),
-        //                            0b11 => Color::RGB(180, 180, 180),
-        //                            _ => panic!("{}", v),
-        //                        };
-        //
-        //                        dump.push((
-        //                            Point::new(dx + ox as u32 as i32, dy + oy as u32 as i32),
-        //                            color,
-        //                        ));
-        //                    }
-        //                }
-        //            }
-        //        }
-        //
-        // if dump.len() > 0 {
-        //    println!("{:?}", dump);
-        //}
-
-        //self.display.draw(dump);
-
-        // 3 - H-Blank
     }
 
     fn object_pixels(&mut self, visible: Vec<OAMEntry>) -> Vec<(Point, Color)> {
@@ -339,7 +284,7 @@ impl PPU {
                     false => x,
                 };
 
-                let address = 0x8000 as u16 + (object.tile_number * 16) as u16 + (obj_y * 2) as u16;
+                let address = VRAM_OFFSET + (object.tile_number * 16) as u16 + (obj_y * 2) as u16;
 
                 let object_bytes = (self.read(address), self.read(address + 1));
 
@@ -380,18 +325,14 @@ impl PPU {
         for i in 0..WIDTH {
             let x = (((self.scx as usize) + i) & 0xFF) as u16;
             let tile_base = base_address + y_adjustment + (x / 8);
-            let tile_number = self.vram[(tile_base - 0x8000) as usize];
+            let tile_number = self.vram[(tile_base - VRAM_OFFSET) as usize];
 
             let row_offset = (background_y % 8) * 2;
 
-            let address = tile_base + (self.scy % 8) as u16;
-
-            let lo_byte = self.read(address);
-            let hi_byte = self.read(address + 1);
-
-            // LCDC Bit 4: 1 = idx from 0x8000, 0= signed idx 0x9000
-            let tile_addressed_data = if base_address == 0x8000 {
-                0x8000 + (tile_number as u16) * 16
+            // LCDC Bit 4: 1 = idx from VRAM_OFFSET, 0= signed idx 0x9000
+            // 0x9000 is the start of tile map 2
+            let tile_addressed_data = if base_address == VRAM_OFFSET {
+                VRAM_OFFSET + (tile_number as u16) * 16
             } else {
                 (0x9000i32 + (tile_number as i32) * 16) as u16
             };
@@ -440,7 +381,7 @@ impl PPU {
     // Helper
 
     fn addr_into_vram_space(address: u16) -> usize {
-        address as usize - 0x8000
+        (address - VRAM_OFFSET) as usize
     }
 
     fn addr_into_oam_space(address: u16) -> usize {
