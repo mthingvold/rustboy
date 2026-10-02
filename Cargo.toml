@@ -17,5 +17,4 @@ lto = true
 
 [dependencies]
 sdl2 = "0.38.0"
-
-nix = { version = "0.31.3", features = ["process"] }
+nix = {version="0.31.3", features=["process"]}
