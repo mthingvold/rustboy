@@ -43,6 +43,8 @@ pub struct PPU {
     vram: [u8; V_RAM_SIZE], // VRAM
     oam: [u8; OAM_SIZE],    // OAM / Sprite Attribute Table
 
+    bg_ids: [u8; WIDTH], // Background colour ids (0..=3) of the current line, for OBJ-to-BG priority
+
     lcdc: LCDC, // 0xFF40 : LCDC Register : LCD C(ontrol) Register
     lcds: LCDS, // 0xFF41 : LCDS Register : LCD S(tatus) Register
     scy: u8,    // 0xFF42 : Scroll Y
@@ -74,6 +76,8 @@ impl PPU {
             vram: [0; V_RAM_SIZE],
             oam: [0; OAM_SIZE],
 
+            bg_ids: [0; WIDTH],
+
             lcdc: LCDC::new(),
             lcds: LCDS::new(),
             scy: 0,
@@ -90,6 +94,10 @@ impl PPU {
             stat_interrupt: false,
             vblank_interrupt: false,
         }
+    }
+
+    pub fn oam_write(&mut self, index: usize, value: u8) {
+        self.oam[index] = value;
     }
 
     pub fn dma_transfer(&mut self, value: u8) {
@@ -117,7 +125,7 @@ impl PPU {
         let mut cycles_left = cycles;
 
         while cycles_left > 0 {
-            let current = std::cmp::min(cycles, 80);
+            let current = std::cmp::min(cycles_left, 80);
 
             // Any amount of "cycles given" should be cleanly divisible by 4, as the CPU will call
             //  this function, and should 'scale' the cycles by 4, to correspond with the difference
@@ -213,109 +221,128 @@ impl PPU {
         let h = self.lcdc.obj_size().1;
 
         // 1 - OAM Search
+        //  The hardware takes the first 10 objects, in OAM order, that overlap the current line
         let mut visible: Vec<OAMEntry> = Vec::new();
+
+        let line = self.ly as i16 + 16;
 
         for entry_number in 0..40 {
             let entry = self.oam_entry(entry_number);
 
             // Comparison method by which the GameBoy PPU uses to determine whether a given object
             //  should be considered 'visible' on the current line
-            if entry.x != 0 && self.ly + 16 >= entry.y && self.ly + 16 < entry.y + h {
+            if line >= entry.y as i16 && line < entry.y as i16 + h as i16 {
                 visible.push(entry);
-            }
-        }
-
-        // Order based on x position, as the 'first' (from the left) 10 sprites should be shown
-        // TODO - Perhaps it's really just the first 10 from the start of the OAM, no sort?
-        visible.sort_by(|a, b| b.x.cmp(&a.x));
-
-        // GameBoy can only have up to 10 sprites per line, remove (don't draw) anything to the
-        //  'right' of the first 10 sprites, as this is how the hardware will resolve >10 sprites
-        if visible.len() > 10 {
-            visible.drain(10..);
+                if visible.len() == 10 {
+                    break;
+                }
+            };
         }
 
         // 2 - Pixel Transfer
 
-        // 2.a - Clear Background
-
-        let mut clear_pixels = Vec::new();
-        for i in 0..WIDTH {
-            clear_pixels.push((
-                Point::new(i as u32 as i32, self.ly as u32 as i32),
-                Color::RGB(255, 255, 255),
-            ));
-        }
-        // self.display.draw(clear_pixels);
-
-        // let clear_bg = (0..WIDTH).into_iter().map(|x| (Point::new(x as u32 as i32, self.ly as u32 as i32), Color::RGB(0, 0, 0))).collect();
-        //self.display.draw(clear_bg);
-
-        // 2.b - Background
+        // 2.a - Background (a disabled background is drawn as a blank row, so that nothing from
+        //  the previous frame is left behind)
         let background_pixels = self.background_pixels();
         self.display.draw(background_pixels);
+
+        // 2.b - Objects
+        let obj_pixels = self.object_pixels(visible);
+        self.display.draw(obj_pixels);
     }
 
+    /// Colours of the visible objects' pixels on the current line. `visible` must be in OAM order.
+    /// At most one pixel is produced per screen column: that of the highest priority object that
+    /// is opaque there, unless that object is behind the background.
     fn object_pixels(&mut self, visible: Vec<OAMEntry>) -> Vec<(Point, Color)> {
         let mut pixels = Vec::new();
 
-        return pixels;
-
-        if visible.len() > 0 {
-            println!("******************************** active sprites");
+        if !self.lcdc.obj_display_enable() {
+            return pixels;
         }
 
-        for object in visible.iter() {
-            let destination_x = ((object.x as i8) - 8) as i32;
-            let destination_y = ((object.y as i8) - 16) as i32;
+        let height = self.lcdc.obj_size().1 as i32;
+        let line = self.ly as i32 + 16;
 
-            let obj_y = match object.flags.flip_y {
-                true => self.lcdc.obj_size().1 - 1 - (self.ly - object.y),
-                false => self.ly - object.y,
+        // DMG priority: lowest x wins, ties go to the lower OAM index. The sort is stable, so
+        //  ties keep OAM order.
+        // https://gbdev.io/pandocs/OAM.html#object-priority-and-conflicts
+        let mut ordered: Vec<&OAMEntry> = visible.iter().collect();
+        ordered.sort_by_key(|object| object.x);
+
+        let mut claimed = [false; WIDTH];
+
+        for object in ordered {
+            let mut row = line - object.y as i32;
+            if object.flags.flip_y {
+                row = height - 1 - row;
+            }
+
+            // 8x16 objects ignore bit 0 of the tile number; rows 8-15 run into the next tile
+            let tile = if height == 16 {
+                object.tile_number & 0xFE
+            } else {
+                object.tile_number
+            };
+            let address = tile as usize * 16 + row as usize * 2;
+            let lo = self.vram[address];
+            let hi = self.vram[address + 1];
+
+            let palette = if object.flags.palette {
+                self.obp1
+            } else {
+                self.obp0
             };
 
-            for x in 0..8 {
-                if (object.x as i8) + (x as i8) < 0 || object.x + x >= WIDTH as u8 {
+            for x in 0..8i32 {
+                let screen_x = object.x as i32 - 8 + x;
+                if screen_x < 0 || screen_x >= WIDTH as i32 {
                     continue;
                 }
 
-                let col = match object.flags.flip_x {
-                    true => 7 - x,
-                    false => x,
-                };
+                let bit = if object.flags.flip_x { x } else { 7 - x };
+                let id = (((hi >> bit) & 1) << 1) | ((lo >> bit) & 1);
 
-                let address = VRAM_OFFSET + (object.tile_number * 16) as u16 + (obj_y * 2) as u16;
+                // Colour id 0 is transparent for objects
+                if id == 0 || claimed[screen_x as usize] {
+                    continue;
+                }
+                claimed[screen_x as usize] = true;
 
-                let object_bytes = (self.read(address), self.read(address + 1));
-
-                let color = (object_bytes.0 & (1 << col)) << 1 | (object_bytes.1 & (1 << col));
-
-                // Translucent
-                if color == 0b00 {
+                // Objects flagged as 'behind BG' only show through BG colour id 0
+                if object.flags.priority && self.bg_ids[screen_x as usize] != 0 {
                     continue;
                 }
 
-                // TODO - Connect to "real" palette
-                let color = match color {
-                    0b01 => Color::RGB(80, 80, 80),
-                    0b10 => Color::RGB(140, 140, 140),
-                    0b11 => Color::RGB(200, 200, 200),
-
-                    _ => panic!("impossible color: {}", color),
-                };
-
-                pixels.push((Point::new(destination_x, destination_y), color));
+                let shade = (palette >> (id * 2)) & 0b11;
+                pixels.push((
+                    Point::new(screen_x, self.ly as i32),
+                    PPU::shade_color(shade),
+                ));
             }
         }
 
         pixels
     }
 
+    /// Maps a DMG shade (0 = lightest .. 3 = darkest) to a screen colour.
+    fn shade_color(shade: u8) -> Color {
+        match shade & 0b11 {
+            0 => Color::RGB(255, 255, 255),
+            1 => Color::RGB(170, 170, 170),
+            2 => Color::RGB(85, 85, 85),
+            _ => Color::RGB(0, 0, 0),
+        }
+    }
+
     fn background_pixels(&mut self) -> Vec<(Point, Color)> {
         let mut pixels: Vec<(Point, Color)> = Vec::new();
 
         if !self.lcdc.bg_display() {
-            return pixels;
+            self.bg_ids = [0; WIDTH];
+            return (0..WIDTH)
+                .map(|i| (Point::new(i as i32, self.ly as i32), PPU::shade_color(0)))
+                .collect();
         }
 
         let base_address = self.lcdc.bg_tile_map_display_select().0;
@@ -331,28 +358,27 @@ impl PPU {
 
             // LCDC Bit 4: 1 = idx from VRAM_OFFSET, 0= signed idx 0x9000
             // 0x9000 is the start of tile map 2
-            let tile_addressed_data = if base_address == VRAM_OFFSET {
+            let tile_addressed_data = if self.lcdc.bg_window_tile_data_select().0 == VRAM_OFFSET {
                 VRAM_OFFSET + (tile_number as u16) * 16
             } else {
-                (0x9000i32 + (tile_number as i32) * 16) as u16
+                (0x9000i32 + ((tile_number as i8) as i32) * 16) as u16
             };
 
             let address = tile_addressed_data + row_offset;
 
+            let lo_byte = self.vram[(address - VRAM_OFFSET) as usize];
+            let hi_byte = self.vram[(address + 1 - VRAM_OFFSET) as usize];
+
             let bit = 7 - (x % 8) as u8;
-            let column = ((((tile_number + 1) >> bit) & 1) << 1) | ((tile_number >> bit) & 1);
+            let column = (((hi_byte >> bit) & 1) << 1) | ((lo_byte >> bit) & 1);
+
+            self.bg_ids[i] = column;
 
             let shade = (self.bgp >> (column * 2)) & 0b11;
-
-            let color = match shade {
-                0 => Color::WHITE,
-                1 => Color::GRAY,
-                //TODO: Set these to normal colors once out of debug
-                2 => Color::YELLOW,
-                3 => Color::GREEN,
-                _ => panic!("Invalid color bit set"),
-            };
-            pixels.push((Point::new(i as i32, self.ly as i32), color));
+            pixels.push((
+                Point::new(i as i32, self.ly as i32),
+                PPU::shade_color(shade),
+            ));
         }
 
         pixels
@@ -362,13 +388,14 @@ impl PPU {
         assert!(entry_number < 40, "asking for entry number beyond 40");
 
         // OAM entries are aligned on 4-byte boundaries beginning at 0xFE00
-        let oam_address: u16 = 0xFE00 + (entry_number * 4) as u16;
-        let flags = self.read(oam_address + 3);
+        // Read straight from OAM: the PPU's own access isn't subject to the CPU's mode restrictions
+        let base = entry_number as usize * 4;
+        let flags = self.oam[base + 3];
 
         OAMEntry {
-            y: self.read(oam_address),
-            x: self.read(oam_address + 1),
-            tile_number: self.read(oam_address + 2),
+            y: self.oam[base],
+            x: self.oam[base + 1],
+            tile_number: self.oam[base + 2],
             flags: OAMFlags {
                 priority: (flags & 0x80) >> 7 != 0,
                 flip_y: (flags & 0x40) >> 6 != 0,
@@ -558,10 +585,8 @@ mod test {
     }
      */
 
-    /* TODO
     #[test]
     fn acceptance_ppu() {
         mooneye_all("acceptance/ppu");
     }
-     */
 }
